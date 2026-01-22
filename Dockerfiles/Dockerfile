@@ -9,7 +9,8 @@ ARG GID=2999
 
 ENV VIRTUAL_ENV=/opt/venv
 
-RUN apk add --update --no-cache python3 py3-pip py3-virtualenv tzdata \
+RUN apk add --update --no-cache python3 py3-pip py3-virtualenv tzdata ca-certificates \
+    && update-ca-certificates \
     && python3 -m venv $VIRTUAL_ENV \
     && addgroup -g $GID -S appuser \
     && adduser  -u $UID -S appuser -G appuser  
