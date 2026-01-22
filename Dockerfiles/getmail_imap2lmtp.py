@@ -46,6 +46,13 @@ class Getmail(threading.Thread):
         self.lmtp_port        = configparser_file.getint(    config_name, 'lmtp_port')
         self.lmtp_recipient   = configparser_file.get(       config_name, 'lmtp_recipient')
         self.lmtp_debug       = configparser_file.getboolean(config_name, 'lmtp_debug')
+        self.smtp_hostname  = configparser_file.get(config_name, 'smtp_hostname', fallback=None)
+        self.smtp_port      = configparser_file.getint(config_name, 'smtp_port', fallback=587)
+        self.smtp_starttls  = configparser_file.getboolean(config_name, 'smtp_starttls', fallback=True)
+        self.smtp_username  = configparser_file.get(config_name, 'smtp_username', fallback=None)
+        self.smtp_password  = configparser_file.get(config_name, 'smtp_password', fallback=None)
+        self.smtp_recipient = configparser_file.get(config_name, 'smtp_recipient', fallback=None)
+        self.smtp_debug     = configparser_file.getboolean(config_name, 'smtp_debug', fallback=False)
 
 
     def run(self):
@@ -162,17 +169,21 @@ class Getmail(threading.Thread):
             self.check_imap_idle_response_counter_between_renew = 0
 
     def imap_fetch_mail(self):
-        #https://github.com/mjs/imapclient/blob/011748fd687c43636a8ef2c3acb9fa85782b91bc/examples/email_parsing.py
         messages = self.imap.search(criteria=u'ALL')
         for uid, message_data in self.imap.fetch(messages, 'RFC822').items():
-          email_message = email.message_from_bytes(message_data[b'RFC822'])
-          #logging.info("%s,%s,%s" % (uid, email_message.get('From'), email_message.get('Subject')) )
-          if self.lmtp_deliver_mail(email_message):
-            if self.imap_move_enable:
-              self.imap_move_mail(uid)
+            email_message = email.message_from_bytes(message_data[b'RFC822'])
+   
+            delivered = False
+            if self.smtp_hostname and self.smtp_recipient:
+                delivered = self.smtp_deliver_mail(email_message)
             else:
-              self.imap_delete_mail(uid)
-              
+                delivered = self.lmtp_deliver_mail(email_message)
+   
+            if delivered:
+                if self.imap_move_enable:
+                    self.imap_move_mail(uid)
+                else:
+                    self.imap_delete_mail(uid)
                 
     def imap_delete_mail(self, uid):
         self.imap.delete_messages([uid])
@@ -247,6 +258,44 @@ class Getmail(threading.Thread):
           logging.error(traceback.format_exc())
           return False
 
+    def smtp_deliver_mail(self, email_message):
+        logging.info("SMTP deliver: start -- SMTP host: %s:%s" % (self.smtp_hostname, self.smtp_port))
+        try:
+            smtp = smtplib.SMTP(self.smtp_hostname, self.smtp_port, timeout=30)
+            if self.smtp_debug:
+                smtp.set_debuglevel(1)
+   
+            # Identidad cliente
+            smtp.ehlo()
+   
+            # STARTTLS
+            if self.smtp_starttls:
+                context = ssl.create_default_context()
+                smtp.starttls(context=context)
+                smtp.ehlo()
+   
+            # AUTH
+            if self.smtp_username and self.smtp_password:
+                smtp.login(self.smtp_username, self.smtp_password)
+   
+            # Añade headers informativos
+            email_message['X-getmail-retrieved-from-mailbox-user'] = self.imap_username
+            email_message['X-getmail-retrieved-from-mailbox-folder'] = self.imap_sync_folder
+   
+            # OJO: para inyección correcta, manda bytes “raw”
+            raw_bytes = email_message.as_bytes()
+   
+            mail_from = self.smtp_username or (email_message.get('Return-Path') or self.imap_username)
+            rcpt_to = self.smtp_recipient
+   
+            smtp.sendmail(mail_from, [rcpt_to], raw_bytes)
+            smtp.quit()
+            return True
+   
+        except Exception as e:
+            logging.error("SMTP deliver (Exception): %s" % (e))
+            logging.error(traceback.format_exc())
+            return False
 
 ########################################################################################################################
 ########################################################################################################################
